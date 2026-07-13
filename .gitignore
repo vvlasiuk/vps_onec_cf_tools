@@ -1,0 +1,7 @@
+# Згенерований артефакт — похідне, не тримаємо в Git
+/output/
+/unpacked/
+__pycache__/
+*.pyc
+.venv/
+*.sqlite
