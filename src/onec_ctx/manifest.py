@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timezone
 
@@ -70,8 +71,18 @@ def _kind(sig_line: str) -> str:
 def build_manifest(entries: list[ModuleEntry], db_path: str,
                    *, source_tree: str, inline_threshold: int = 3,
                    generator_version: str = "0.1.0") -> dict:
-    """Створює SQLite-маніфест з обробленого дерева. Повертає підсумкову статистику."""
-    conn = sqlite3.connect(db_path)
+    """Створює SQLite-маніфест з обробленого дерева. Повертає підсумкову статистику.
+
+    Запис іде в тимчасовий файл поряд, а наприкінці — атомарна підміна цільового
+    (os.replace). Так vps_api ніколи не натрапить на напівзаписаний маніфест:
+    він бачить або старий цілий файл, або новий цілий.
+    """
+    tmp_path = db_path + ".tmp"
+    # прибираємо недороблений залишок від попереднього обірваного запуску
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    conn = sqlite3.connect(tmp_path)
     conn.executescript(SCHEMA)
     cur = conn.cursor()
 
@@ -130,4 +141,7 @@ def build_manifest(entries: list[ModuleEntry], db_path: str,
 
     conn.commit()
     conn.close()
+
+    # атомарна підміна: у межах одного диска os.replace неподільний
+    os.replace(tmp_path, db_path)
     return stats
