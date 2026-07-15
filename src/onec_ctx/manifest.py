@@ -14,6 +14,14 @@
   - «компакт»  — modules.skeleton_compact (сигнатури без доккоментарів);
   - «повний»   — modules.skeleton_full (з доккоментарями).
 Тіло процедури — symbols.body за (module_path, name).
+
+Пошук по коду (cf_find) покривається двома дослівними джерелами:
+  - symbols.body        — усе, що ВСЕРЕДИНІ процедур;
+  - modules.outside_text — усе, що ПОЗА процедурами (модульні Перем, головний
+    розділ, вміст #Областей поза процедурами), збережене дослівно.
+outside_text — це повний текст модуля, у якому рядки, що належать процедурам,
+занулені (порожні). Так тіла НЕ дублюються (вони вже в symbols.body), а номери
+рядків у outside_text збігаються зі справжніми номерами в модулі.
 """
 from __future__ import annotations
 
@@ -23,6 +31,10 @@ from datetime import datetime, timezone
 
 from onec_ctx.inventory import ModuleEntry
 from onec_ctx.bsl.skeleton import render_full, render_compact
+
+# Версія схеми маніфесту. Читач (vps_api) звіряє її з meta.schema_version,
+# щоб не намагатися читати відсутню колонку на старому маніфесті.
+SCHEMA_VERSION = "2"
 
 SCHEMA = """
 CREATE TABLE meta (
@@ -37,7 +49,8 @@ CREATE TABLE modules (
     proc_count       INTEGER,
     export_count     INTEGER,
     skeleton_full    TEXT,
-    skeleton_compact TEXT
+    skeleton_compact TEXT,
+    outside_text     TEXT           -- повний текст модуля з зануленими рядками процедур
 );
 
 CREATE TABLE symbols (
@@ -68,9 +81,29 @@ def _kind(sig_line: str) -> str:
     return "Функция" if low.startswith(("функц", "функ", "функція")) else "Процедура"
 
 
+def _outside_text(full_text: str, procedures) -> str:
+    """Повний текст модуля, де рядки процедур занулені (порожні).
+
+    Зберігає позиції рядків, тож індекс у результаті = справжній номер рядка
+    модуля. Тіла процедур НЕ дублюються — вони в symbols.body. Якщо поза
+    процедурами немає значущого тексту, повертає "" (нема чого шукати).
+    """
+    lines = full_text.splitlines()
+    n = len(lines)
+    inproc = bytearray(n + 2)  # 1-based прапорці «рядок належить процедурі»
+    for p in procedures:
+        start = p.start_line if p.start_line and p.start_line > 0 else 1
+        end = p.end_line if p.end_line and p.end_line > 0 else n
+        for ln in range(start, min(end, n) + 1):
+            inproc[ln] = 1
+    out = ["" if inproc[i + 1] else lines[i] for i in range(n)]
+    text = "\n".join(out)
+    return text if text.strip() else ""
+
+
 def build_manifest(entries: list[ModuleEntry], db_path: str,
                    *, source_tree: str, inline_threshold: int = 3,
-                   generator_version: str = "0.1.0") -> dict:
+                   generator_version: str = "0.2.0") -> dict:
     """Створює SQLite-маніфест з обробленого дерева. Повертає підсумкову статистику.
 
     Запис іде в тимчасовий файл поряд, а наприкінці — атомарна підміна цільового
@@ -103,12 +136,14 @@ def build_manifest(entries: list[ModuleEntry], db_path: str,
         full = render_full(model, inline_threshold=inline_threshold)
         compact = render_compact(model)
         exp_count = sum(1 for p in model.procedures if p.is_export)
+        outside = _outside_text(e.text, model.procedures)
 
         cur.execute(
             "INSERT INTO modules(module_path, role, source, proc_count, "
-            "export_count, skeleton_full, skeleton_compact) VALUES (?,?,?,?,?,?,?)",
+            "export_count, skeleton_full, skeleton_compact, outside_text) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (e.path, e.role, e.source, len(model.procedures),
-             exp_count, full, compact))
+             exp_count, full, compact, outside))
 
         for p in model.procedures:
             sig_line = p.body_text.splitlines()[0]
@@ -133,6 +168,7 @@ def build_manifest(entries: list[ModuleEntry], db_path: str,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_tree": source_tree,
         "generator_version": generator_version,
+        "schema_version": SCHEMA_VERSION,
         "modules": str(stats["modules"]),
         "procedures": str(stats["procedures"]),
         "exported": str(stats["exported"]),
